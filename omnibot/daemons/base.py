@@ -31,8 +31,7 @@ class Daemon(object):
     # Interval to ran the job at
     interval = 60
 
-    def __init__(self, slack_client):
-        self.slack_client = slack_client
+    def __init__(self):
         if not hasattr(self, 'name'):
             self.name = self.__class__.__name__
         self.lastrun = 0
@@ -56,11 +55,12 @@ class Daemon(object):
         """
         raise NotImplementedError
 
-    def main(self):
+    def main(self, slack_client):
         """
           This method is called when the process it's started.
           It ensures that we run the task at the right interval
         """
+        self.slack_client = slack_client
 
         # Sleep for 10s to ensure everything is setup correct
         sleep(10)
@@ -71,6 +71,4 @@ class Daemon(object):
             if self.lastrun + self.interval < time():
                 # Run the task
                 self.run()
-                self.lastrun = time()        
-
-
+                self.lastrun = time()

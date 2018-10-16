@@ -18,13 +18,13 @@ log = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s %(levelname)s %(name)s [%(processName)s:%(process)d] %(message)s')
 IGNORED_EVENT_TYPES = ['hello', 'pong', 'reconnect_url']
+main_process_pid = os.getpid()
 
 
 class OmniBot(object):
     def __init__(self, config):
         # Set the process title 
         setproctitle("omnibot [manager]")
-        # TODO config for proxies
 
         # set the config object
         self.config = config
@@ -34,13 +34,22 @@ class OmniBot(object):
         if not self.token:
             raise ValueError("Please add a SLACK_TOKEN to your config file.")
 
+        # Setup https proxy if required
+        if self.config.get("PROXY", None) is not None:
+            self.proxy = {"http": self.config.get("PROXY"),
+                          "https": self.config.get("PROXY")}
+        else:
+            self.proxy = None
+
         # initialize stateful fields
+        self.bot_id = None
         self.last_ping = 0
         self.connected = False
         self.bot_daemons = {}
         self.bot_plugins = {}
+        self.daemon_processes = []
         self.keep_running = True
-        self.slack_client = SlackClient(self.token)
+        self.slack_client = SlackClient(self.token, self.proxy)
 
     def ping(self):
         """
@@ -55,6 +64,7 @@ class OmniBot(object):
                 self.last_ping = now
             # If we cannot ping, try to reconnect
             except:
+                log.error("Bot has been disconnected from Slack")
                 self.connected = False
                 self.connect()
 
@@ -68,6 +78,16 @@ class OmniBot(object):
             time.sleep(5)
         log.info("Connected to Slack")
 
+    def determine_bot_id(self, username):
+        """
+          Determine the ID of the Slack Bot User
+        """
+        user_list = self.slack_client.api_call('users.list')
+        for user in user_list['members']:
+            if user['name'] == username:
+                return user['id']
+        log.error("Could not find Bot ID")
+
     def load_daemons(self):
         """
           Load and start the background daemons
@@ -80,6 +100,7 @@ class OmniBot(object):
             child.daemon = True
             log.info("Starting background daemon: {0} with an interval of {1}secs".format(daemon.name, job.interval))
             child.start()
+            self.daemon_processes.append(child)
 
     def load_plugins(self):
         """
@@ -97,14 +118,18 @@ class OmniBot(object):
             event_type = event['type']
             # Process standard messages
             if event_type == "message":
-                for plugin in self.bot_plugins.values():
-                    if plugin.determine_request(event['text'].split()[0]):
-                        plugin.process(self.slack_client, "message", event)
+                # Ensure we aren't infinitely responding to the bot itself
+                if "bot_id" not in event:
+                    for plugin in self.bot_plugins.values():
+                        if event['text'].split()[0] == "<@{0}>".format(self.bot_id) and plugin.determine_request(event['text'].split()[1]):
+                            plugin = plugin(self.slack_client, event_type, event)
+                            plugin.process()
             # Process other type of event types
             elif event_type not in IGNORED_EVENT_TYPES:
                 for plugin in self.bot_plugins.values():
-                    plugin.process(self.slack_client, event_type, event)
-
+                    plugin = plugin(self.slack_client, event_type, event)
+                    plugin.process()
+ 
     def setup_signal_handler(self):
         """
           Setup signal handlers for HUP, INT, TERM signals
@@ -138,6 +163,9 @@ class OmniBot(object):
         # Connect to Slack
         self.connect()
 
+        # Determine the ID of the Slack bot
+        self.bot_id = self.determine_bot_id(self.slack_client.server.username)
+
         # Ping just incase it took a long time to connect to Slack
         self.ping()
 
@@ -157,6 +185,21 @@ class OmniBot(object):
 
             # See if we need to ping Slack
             self.ping()
+
+            self._reap_children()
+
+    def _reap_children(self):
+        """
+          Clean up dead processes that haven't been reaped
+        """
+
+        dead = [child for child in self.daemon_processes if not child.is_alive()]
+        self.daemon_processes = [child for child in self.daemon_processes if child.is_alive()]
+
+        for child in dead:
+            log.warn("Reaping {0} PID {1} with exit code {2}".format(child.pid, child.name, child.exitcode))
+            child.join(0.1)
+        return
 
     def shutdown(self):
         """

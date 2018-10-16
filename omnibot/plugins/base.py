@@ -26,13 +26,19 @@ class Plugin(object):
     __metaclass__ = ABCMeta
     nae = "base"
 
-    def __init__(self):
+    def __init__(self, slack_client, event_type, event):
         if not hasattr(self, 'name'):
             self.name = self.__class__.__name__
+        self.event = event
+        self.event_type = event_type
+        self.slack_client = slack_client
+        if self.event.get("user"):
+            self._user_name = self.event.get("user")
+        if self.event.get("channel"):
+            self._channel_name = self.event.get("channel")
 
     @classmethod
-    def process(self, slack_client, event_type, event):
-        self.slack_client = slack_client
+    def process(self):
         try:
             func = getattr(self, "process_{0}".format(event_type))
         except AttributeError:
